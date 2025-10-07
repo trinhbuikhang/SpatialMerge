@@ -20,10 +20,14 @@ def create_output_dataframe(best_matches, msd_df, lmd_df, lmd_output_cols, lmd_s
     result = msd_df.clone()
 
     # Add match information (left join, so unmatched MSD rows get null values)
+    match_columns = ["msd_idx", "lmd_idx"]
+    if "time_diff" in best_matches.columns:
+        match_columns.append("time_diff")
+    if "chainage_diff" in best_matches.columns:
+        match_columns.append("chainage_diff")
+
     result = result.join(
-        best_matches.select([
-            "msd_idx", "lmd_idx", "time_diff", "chainage_diff"
-        ]),
+        best_matches.select(match_columns),
         on="msd_idx",
         how="left"
     )
@@ -53,10 +57,14 @@ def create_output_dataframe(best_matches, msd_df, lmd_df, lmd_output_cols, lmd_s
             result = result.join(lmd_user_data, on="lmd_idx", how="left")
 
     # Convert duration columns to seconds for CSV compatibility
-    result = result.with_columns([
-        pl.col("time_diff").dt.total_seconds().alias("time_diff_seconds"),
-        pl.col("chainage_diff").alias("chainage_diff_meters"),
-    ])
+    convert_columns = []
+    if "time_diff" in result.columns:
+        convert_columns.append(pl.col("time_diff").dt.total_seconds().alias("time_diff_seconds"))
+    if "chainage_diff" in result.columns:
+        convert_columns.append(pl.col("chainage_diff").alias("chainage_diff_meters"))
+
+    if convert_columns:
+        result = result.with_columns(convert_columns)
 
     # Drop helper columns (preserve original MSD row order)
     cols_to_drop = [
@@ -123,13 +131,31 @@ def save_output(result, msd_path, lmd_path, output_dir=None, msd_df=None):
 
     # Summary statistics
     logging.info("\n=== MATCH STATISTICS ===")
-    logging.info(
-        f"Time diff - Min: {result['time_diff_seconds'].min():.2f}s, "
-        f"Mean: {result['time_diff_seconds'].mean():.2f}s, "
-        f"Max: {result['time_diff_seconds'].max():.2f}s"
-    )
-    logging.info(
-        f"Chainage diff - Min: {result['chainage_diff_meters'].min():.2f}m, "
-        f"Mean: {result['chainage_diff_meters'].mean():.2f}m, "
-        f"Max: {result['chainage_diff_meters'].max():.2f}m"
-    )
+
+    # Time difference statistics (only if time_diff_seconds column exists)
+    if "time_diff_seconds" in result.columns:
+        time_stats = result.select("time_diff_seconds").filter(pl.col("time_diff_seconds").is_not_null())
+        if len(time_stats) > 0:
+            logging.info(
+                f"Time diff - Min: {time_stats['time_diff_seconds'].min():.2f}s, "
+                f"Mean: {time_stats['time_diff_seconds'].mean():.2f}s, "
+                f"Max: {time_stats['time_diff_seconds'].max():.2f}s"
+            )
+        else:
+            logging.info("Time diff - No valid time differences")
+    else:
+        logging.info("Time diff - Not available (time matching disabled)")
+
+    # Chainage difference statistics (only if chainage_diff_meters column exists)
+    if "chainage_diff_meters" in result.columns:
+        chainage_stats = result.select("chainage_diff_meters").filter(pl.col("chainage_diff_meters").is_not_null())
+        if len(chainage_stats) > 0:
+            logging.info(
+                f"Chainage diff - Min: {chainage_stats['chainage_diff_meters'].min():.2f}m, "
+                f"Mean: {chainage_stats['chainage_diff_meters'].mean():.2f}m, "
+                f"Max: {chainage_stats['chainage_diff_meters'].max():.2f}m"
+            )
+        else:
+            logging.info("Chainage diff - No valid chainage differences")
+    else:
+        logging.info("Chainage diff - Not available (road-based matching)")

@@ -75,30 +75,40 @@ def prepare_msd_data(msd_path):
         # Filter to valid lanes
         msd_df = msd_df.filter(pl.col("Lane").is_in(VALID_LANES))
 
-    # Parse dates
-    msd_df = msd_df.with_columns(
-        pl.col("TestDateUTC")
-        .str.strptime(pl.Datetime, "%d/%m/%y %H:%M:%S%.f", strict=False)
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False
+    # Parse dates (only if TestDateUTC column exists)
+    if "TestDateUTC" in msd_df.columns:
+        msd_df = msd_df.with_columns(
+            pl.col("TestDateUTC")
+            .str.strptime(pl.Datetime, "%d/%m/%y %H:%M:%S%.f", strict=False)
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False
+                )
             )
-        )
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%y %H:%M:%S", strict=False
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%y %H:%M:%S", strict=False
+                )
             )
-        )
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False
+                )
             )
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%Y-%m-%dT%H:%M:%S%.fZ", strict=False
+                )
+            )
+            .alias("TestDateUTC_parsed")
         )
-        .alias("TestDateUTC_parsed")
-    )
 
-    # Filter out rows with unparseable dates
-    msd_df = msd_df.filter(pl.col("TestDateUTC_parsed").is_not_null())
+        # Filter out rows with unparseable dates
+        msd_df = msd_df.filter(pl.col("TestDateUTC_parsed").is_not_null())
+    else:
+        # Add null TestDateUTC_parsed column if no date column exists
+        msd_df = msd_df.with_columns(pl.lit(None).cast(pl.Datetime).alias("TestDateUTC_parsed"))
+        logging.warning("No TestDateUTC column found in MSD data - time matching will be disabled")
 
     # Parse coordinates and chainage with automatic mapping
     coord_columns = []
@@ -181,50 +191,62 @@ def prepare_lmd_data(lmd_path):
         # Filter to valid lanes
         lmd_df = lmd_df.filter(pl.col("Lane").is_in(VALID_LANES))
 
-    # Parse dates
-    lmd_df = lmd_df.with_columns(
-        pl.col("TestDateUTC")
-        .str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.fZ", strict=False)
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False
+    # Parse dates (only if TestDateUTC column exists)
+    if "TestDateUTC" in lmd_df.columns:
+        lmd_df = lmd_df.with_columns(
+            pl.col("TestDateUTC")
+            .str.strptime(pl.Datetime, "%Y-%m-%dT%H:%M:%S%.fZ", strict=False)
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%Y %H:%M:%S%.f", strict=False
+                )
             )
-        )
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%y %H:%M:%S%.f", strict=False
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%y %H:%M:%S%.f", strict=False
+                )
             )
-        )
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%Y %H:%M:%S", strict=False
+                )
             )
-        )
-        .fill_null(
-            pl.col("TestDateUTC").str.strptime(
-                pl.Datetime, "%d/%m/%y %H:%M:%S", strict=False
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%d/%m/%y %H:%M:%S", strict=False
+                )
             )
+            .fill_null(
+                pl.col("TestDateUTC").str.strptime(
+                    pl.Datetime, "%Y-%m-%dT%H:%M:%S%.fZ", strict=False
+                )
+            )
+            .alias("TestDateUTC_parsed")
         )
-        .alias("TestDateUTC_parsed")
-    )
 
-    # Filter out rows with unparseable dates
-    lmd_df = lmd_df.filter(pl.col("TestDateUTC_parsed").is_not_null())
+        # Filter out rows with unparseable dates
+        lmd_df = lmd_df.filter(pl.col("TestDateUTC_parsed").is_not_null())
+    else:
+        # Add null TestDateUTC_parsed column if no date column exists
+        lmd_df = lmd_df.with_columns(pl.lit(None).cast(pl.Datetime).alias("TestDateUTC_parsed"))
+        logging.warning("No TestDateUTC column found in LMD data - time matching will be disabled")
 
-    # Parse coordinates and chainage with automatic mapping
+    # Parse coordinates and chainage with automatic mapping (coordinates are optional for LMD)
     coord_columns = []
 
     if lat_col:
         coord_columns.append(pl.col(lat_col).cast(pl.Float64, strict=False).alias("Lat"))
     else:
-        logging.error("No latitude column found in LMD data")
-        return pl.DataFrame()
+        # Add null Lat column if no latitude column exists
+        coord_columns.append(pl.lit(None).cast(pl.Float64).alias("Lat"))
+        logging.warning("No latitude column found in LMD data - spatial matching will be disabled")
 
     if lon_col:
         coord_columns.append(pl.col(lon_col).cast(pl.Float64, strict=False).alias("Lon"))
     else:
-        logging.error("No longitude column found in LMD data")
-        return pl.DataFrame()
+        # Add null Lon column if no longitude column exists
+        coord_columns.append(pl.lit(None).cast(pl.Float64).alias("Lon"))
+        logging.warning("No longitude column found in LMD data - spatial matching will be disabled")
 
     if chainage_col:
         coord_columns.append(pl.col(chainage_col).cast(pl.Float64, strict=False).alias("Chain"))
@@ -232,15 +254,20 @@ def prepare_lmd_data(lmd_path):
         # Use location * 1000 as chainage if no chainage column found
         coord_columns.append((pl.col("location").cast(pl.Float64, strict=False) * 1000).alias("Chain"))
         logging.info("Using location*1000 as Chainage for LMD")
+    elif "Start Chainage (km)" in lmd_df.columns:
+        # Use start chainage * 1000 for LMD feedback files
+        coord_columns.append((pl.col("Start Chainage (km)").cast(pl.Float64, strict=False) * 1000).alias("Chain"))
+        logging.info("Using Start Chainage (km)*1000 as Chainage for LMD")
     else:
-        logging.error("No chainage or location column found in LMD data")
-        return pl.DataFrame()
+        # Add null Chain column if no chainage column exists
+        coord_columns.append(pl.lit(None).cast(pl.Float64).alias("Chain"))
+        logging.warning("No chainage column found in LMD data - road matching may be limited")
 
-    lmd_df = lmd_df.with_columns(coord_columns).filter(
-        pl.col("Lat").is_not_null()
-        & pl.col("Lon").is_not_null()
-        & pl.col("Chain").is_not_null()
-    )
+    lmd_df = lmd_df.with_columns(coord_columns)
+
+    # Filter only for required columns (Chain is required for road matching, Lat/Lon are optional)
+    filter_conditions = [pl.col("Chain").is_not_null()]
+    lmd_df = lmd_df.filter(*filter_conditions)
 
     # Add row index
     lmd_df = lmd_df.with_row_index("lmd_idx")

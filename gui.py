@@ -24,7 +24,7 @@ from config import (
 )
 from file_utils import select_lmd_columns
 from data_preparation import prepare_msd_data, prepare_lmd_data
-from matching import perform_spatial_matching, filter_and_select_matches
+from matching import perform_spatial_matching, filter_and_select_matches, create_all_pairs, perform_road_based_matching
 from output import create_output_dataframe, save_output
 
 
@@ -48,9 +48,73 @@ class WorkerThread(QThread):
 
             self.progress.emit(f"MSD: {len(msd_df)} rows, LMD: {len(lmd_df)} rows")
 
-            # Perform spatial matching
-            self.progress.emit("Performing spatial matching...")
-            pairs_df = perform_spatial_matching(msd_df, lmd_df, self.params['max_spatial_dist'])
+            # Check if coordinate columns exist AND have valid data (support both Lat/Lon and Latitude/Longitude formats)
+            has_lat_lon_cols = "Lat" in msd_df.columns and "Lon" in msd_df.columns and "Lat" in lmd_df.columns and "Lon" in lmd_df.columns
+            if has_lat_lon_cols:
+                msd_lat_nulls = msd_df.select("Lat").null_count().item()
+                msd_lon_nulls = msd_df.select("Lon").null_count().item()
+                lmd_lat_nulls = lmd_df.select("Lat").null_count().item()
+                lmd_lon_nulls = lmd_df.select("Lon").null_count().item()
+                msd_rows = msd_df.shape[0]
+                lmd_rows = lmd_df.shape[0]
+                has_lat_lon = (msd_lat_nulls < msd_rows and msd_lon_nulls < msd_rows and
+                              lmd_lat_nulls < lmd_rows and lmd_lon_nulls < lmd_rows)
+            else:
+                has_lat_lon = False
+
+            has_latlon_cols = "Latitude" in msd_df.columns and "Longitude" in msd_df.columns and "Latitude" in lmd_df.columns and "Longitude" in lmd_df.columns
+            if has_latlon_cols:
+                msd_lat_nulls = msd_df.select("Latitude").null_count().item()
+                msd_lon_nulls = msd_df.select("Longitude").null_count().item()
+                lmd_lat_nulls = lmd_df.select("Latitude").null_count().item()
+                lmd_lon_nulls = lmd_df.select("Longitude").null_count().item()
+                msd_rows = msd_df.shape[0]
+                lmd_rows = lmd_df.shape[0]
+                has_latitude_longitude = (msd_lat_nulls < msd_rows and msd_lon_nulls < msd_rows and
+                                        lmd_lat_nulls < lmd_rows and lmd_lon_nulls < lmd_rows)
+            else:
+                has_latitude_longitude = False
+
+            has_coordinates = has_lat_lon or has_latitude_longitude
+
+            # Check if time columns exist and are valid
+            has_time_data = ("TestDateUTC_parsed" in msd_df.columns and "TestDateUTC_parsed" in lmd_df.columns and
+                            msd_df.select("TestDateUTC_parsed").dtypes[0] == pl.Datetime and
+                            lmd_df.select("TestDateUTC_parsed").dtypes[0] == pl.Datetime)
+
+            # Check if road-based matching columns exist
+            has_road_matching_cols = ("road_id" in msd_df.columns and "region_id" in msd_df.columns and "Chain" in msd_df.columns and
+                                     "road_id" in lmd_df.columns and "region_id" in lmd_df.columns and
+                                     "Start Chainage (km)" in lmd_df.columns and "End Chainage (km)" in lmd_df.columns)
+
+            # Check if we need to force spatial matching to avoid memory issues
+            max_pairs = len(msd_df) * len(lmd_df)
+            force_spatial = False
+            if not self.params.get('enable_spatial', True) and max_pairs > 10000000:  # 10M pairs threshold
+                force_spatial = True
+                self.progress.emit(f"Warning: Large dataset detected ({max_pairs:,} potential pairs). Forcing spatial matching to prevent memory issues.")
+
+            # Check if spatial matching is requested but coordinates are missing
+            force_road_matching = False
+            if self.params.get('enable_spatial', True) and not has_coordinates:
+                force_road_matching = True
+                self.progress.emit("Warning: Coordinate columns (Lat/Lon or Latitude/Longitude) not found. Switching to road-based matching.")
+
+            # Determine matching strategy
+            use_spatial = (self.params.get('enable_spatial', True) or force_spatial) and has_coordinates and not force_road_matching
+            use_road_based = not use_spatial and has_road_matching_cols
+
+            # Perform matching based on strategy
+            if use_spatial:
+                self.progress.emit("Performing spatial matching...")
+                pairs_df = perform_spatial_matching(msd_df, lmd_df, self.params['max_spatial_dist'])
+            elif use_road_based:
+                self.progress.emit("Performing road-based matching...")
+                pairs_df = perform_road_based_matching(msd_df, lmd_df)
+            else:
+                self.progress.emit("Creating pairs for non-spatial matching...")
+                # Create pairs for non-spatial matching (road-based if enabled)
+                pairs_df = create_all_pairs(msd_df, lmd_df, enable_road=self.params.get('enable_road', True) or force_road_matching)
 
             if pairs_df.is_empty():
                 self.finished.emit(None)
@@ -58,7 +122,15 @@ class WorkerThread(QThread):
 
             # Filter and select best matches
             self.progress.emit("Filtering and selecting best matches...")
-            best_matches = filter_and_select_matches(pairs_df, self.params['max_time_diff'], self.params['max_chainage_diff'])
+            actual_spatial_used = use_spatial
+            best_matches = filter_and_select_matches(
+                pairs_df, 
+                self.params['max_time_diff'], 
+                self.params['max_chainage_diff'],
+                enable_time=self.params.get('enable_time', True) and has_time_data,
+                enable_road=self.params.get('enable_road', True) or use_road_based,
+                enable_spatial=actual_spatial_used
+            )
 
             if best_matches.is_empty():
                 self.finished.emit(None)
@@ -146,9 +218,11 @@ class MSDLMDMergerGUI(QMainWindow):
 
         # MSD file selection
         msd_layout = QHBoxLayout()
-        self.msd_label = QLabel("MSD File: Not selected")
+        self.msd_label = QLabel("Base Dataset (File 1): Not selected")
         self.msd_label.setStyleSheet("border: 1px solid #ccc; padding: 5px;")
-        msd_btn = QPushButton("Select MSD")
+        self.msd_label.setToolTip("This is the main dataset. All columns from this file will be kept in the output.")
+        msd_btn = QPushButton("Select Base Dataset")
+        msd_btn.setToolTip("This is the main dataset. All columns from this file will be kept in the output.")
         msd_btn.clicked.connect(self.select_msd_file)
         msd_layout.addWidget(self.msd_label)
         msd_layout.addWidget(msd_btn)
@@ -156,9 +230,11 @@ class MSDLMDMergerGUI(QMainWindow):
 
         # LMD file selection
         lmd_layout = QHBoxLayout()
-        self.lmd_label = QLabel("LMD File: Not selected")
+        self.lmd_label = QLabel("Supplementary Dataset (File 2): Not selected")
         self.lmd_label.setStyleSheet("border: 1px solid #ccc; padding: 5px;")
-        lmd_btn = QPushButton("Select LMD")
+        self.lmd_label.setToolTip("Select the file that contains additional columns you want to add based on location matching.")
+        lmd_btn = QPushButton("Select Supplementary Dataset")
+        lmd_btn.setToolTip("Select the file that contains additional columns you want to add based on location matching.")
         lmd_btn.clicked.connect(self.select_lmd_file)
         lmd_layout.addWidget(self.lmd_label)
         lmd_layout.addWidget(lmd_btn)
@@ -308,22 +384,22 @@ class MSDLMDMergerGUI(QMainWindow):
     def select_msd_file(self):
         """Select MSD file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select MSD file", "", "CSV files (*.csv);;All files (*.*)"
+            self, "Select Base Dataset (File 1)", "", "CSV files (*.csv);;All files (*.*)"
         )
         if file_path:
             self.msd_path = file_path
-            self.msd_label.setText(f"MSD File: {os.path.basename(file_path)}")
+            self.msd_label.setText(f"Base Dataset (File 1): {os.path.basename(file_path)}")
             self.check_run_enabled()
             self.log_message(f"Selected MSD: {file_path}")
 
     def select_lmd_file(self):
         """Select LMD file."""
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select LMD file", "", "CSV files (*.csv);;All files (*.*)"
+            self, "Select Supplementary Dataset (File 2)", "", "CSV files (*.csv);;All files (*.*)"
         )
         if file_path:
             self.lmd_path = file_path
-            self.lmd_label.setText(f"LMD File: {os.path.basename(file_path)}")
+            self.lmd_label.setText(f"Supplementary Dataset (File 2): {os.path.basename(file_path)}")
             self.check_run_enabled()
             self.log_message(f"Selected LMD: {file_path}")
 
@@ -385,7 +461,7 @@ class MSDLMDMergerGUI(QMainWindow):
     def run_merge(self):
         """Run the merge process."""
         if not self.msd_path or not self.lmd_path:
-            QMessageBox.warning(self, "Warning", "Please select both MSD and LMD files!")
+            QMessageBox.warning(self, "Warning", "Please select both Base Dataset and Supplementary Dataset files!")
             return
 
         # Get selected columns
